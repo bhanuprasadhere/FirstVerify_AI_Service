@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FirstVerify AI SQL Engine</title>
+    <style>
+        :root {
+            --primary: #0056b3;
+            --bg: #f4f7fa;
+            --card-bg: #ffffff;
+            --text: #333;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            display: flex;
+            justify-content: center;
+            padding: 40px;
+            margin: 0;
+        }
+
+        .container {
+            width: 800px;
+            background: var(--card-bg);
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: var(--primary);
+            margin-top: 0;
+        }
+
+        .badge {
+            background: #e1ecf4;
+            color: var(--primary);
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        /* Input Section */
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+
+        input[type="number"],
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            box-sizing: border-box;
+            /* Fixes padding issue */
+            font-size: 1rem;
+        }
+
+        button {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 1rem;
+            cursor: pointer;
+            width: 100%;
+            transition: background 0.3s;
+        }
+
+        button:hover {
+            background-color: #004494;
+        }
+
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        /* Output Section */
+        .output-box {
+            margin-top: 30px;
+            border-top: 2px solid #eee;
+            padding-top: 20px;
+            display: none;
+            /* Hidden by default */
+        }
+
+        .log-box {
+            background: #2d2d2d;
+            color: #00ff00;
+            font-family: 'Consolas', monospace;
+            padding: 15px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            margin-bottom: 15px;
+            white-space: pre-wrap;
+        }
+
+        .sql-box {
+            background: #f8f9fa;
+            border-left: 5px solid var(--primary);
+            padding: 15px;
+            font-family: 'Consolas', monospace;
+            color: #333;
+            white-space: pre-wrap;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h1>FirstVerify AI Agent</h1>
+            <span class="badge">Production V7</span>
+        </div>
+        <p>Natural Language Interface for Insurance Validation Data</p>
+
+        <div class="input-group">
+            <label>Extraction ID (File ID)</label>
+            <input type="number" id="extId" value="501">
+        </div>
+
+        <div class="input-group">
+            <label>Ask a Question</label>
+            <input type="text" id="question" placeholder="e.g. Get the Producer Name and GL Occurrence Limit"
+                value="Get the Producer Name and GL Occurrence Limit">
+        </div>
+
+        <button id="submitBtn" onclick="askAgent()">
+            <span id="loader" class="spinner" style="display:none;"></span>
+            <span id="btnText">Generate SQL</span>
+        </button>
+
+        <div id="resultArea" class="output-box">
+            <label>🤖 AI Thought Process (ID Extraction)</label>
+            <div id="aiLog" class="log-box">...</div>
+
+            <label>⚡ Generated Production SQL</label>
+            <div id="sqlOutput" class="sql-box">...</div>
+        </div>
+    </div>
+
+    <script>
+        async function askAgent() {
+            // 1. Setup UI
+            const btn = document.getElementById('submitBtn');
+            const loader = document.getElementById('loader');
+            const btnText = document.getElementById('btnText');
+            const resultArea = document.getElementById('resultArea');
+            const aiLog = document.getElementById('aiLog');
+            const sqlOutput = document.getElementById('sqlOutput');
+
+            btn.disabled = true;
+            loader.style.display = 'inline-block';
+            btnText.innerText = "Processing...";
+            resultArea.style.display = 'none';
+
+            // 2. Prepare Data
+            const payload = {
+                extraction_id: parseInt(document.getElementById('extId').value),
+                question: document.getElementById('question').value
+            };
+
+            try {
+                // 3. Call Python API
+                const response = await fetch('http://127.0.0.1:8000/generate_sql', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const data = await response.json();
+
+                // 4. Update UI
+                resultArea.style.display = 'block';
+
+                // Show AI Raw Response (Cleaned up a bit)
+                aiLog.innerText = data.ai_identified_ids
+                    ? data.ai_identified_ids.replace(/<\|.*?\|>/g, '').trim()
+                    : "No IDs identified.";
+
+                // Show Final SQL
+                sqlOutput.innerText = data.generated_sql;
+
+            } catch (error) {
+                alert("Error connecting to Python API. Is it running?");
+                console.error(error);
+            } finally {
+                // Reset Button
+                btn.disabled = false;
+                loader.style.display = 'none';
+                btnText.innerText = "Generate SQL";
+            }
+        }
+    </script>
+
+</body>
+
+</html>
