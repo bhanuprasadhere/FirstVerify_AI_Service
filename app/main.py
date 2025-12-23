@@ -153,6 +153,11 @@ WHERE ExtractionId = {extraction_id};"""
 # ==============================================================================
 
 
+@app.get("/")
+def home():
+    return {"status": "Online", "service": "FirstVerify AI Agent"}
+# -------------------------------------
+
 @app.post("/generate_sql")
 def generate_sql(request: QuestionRequest):
     # 1. Context
