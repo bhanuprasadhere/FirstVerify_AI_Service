@@ -1,14 +1,16 @@
 import os
 from dotenv import load_dotenv
-
-# Load secrets from .env file
 load_dotenv()
 
-# CONFIGURATION (No more hardcoding!)
-SERVER_NAME = os.getenv("DB_SERVER")
-DATABASE_NAME = os.getenv("DB_NAME")
+# Grabs everything from your .env file
+SERVER_NAME = os.getenv("DB_SERVER", r'localhost\SQLEXPRESS')
+DATABASE_NAME = os.getenv("DB_NAME", 'pqFirstVerifyProduction')
 AWS_LLM_IP = os.getenv("AWS_LLM_IP")
-AWS_URL = f"http://{AWS_LLM_IP}:{os.getenv('AWS_LLM_PORT')}/api/chat"
+AWS_URL = f"http://{AWS_LLM_IP}:11434/api/chat"
+
+print(f"🚀 Service starting using LLM at: {AWS_URL}")
+
+# print(f"🚀 Service starting using LLM at: {AWS_URL}")
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from fastapi import FastAPI
@@ -18,13 +20,7 @@ import requests
 import re
 import json
 
-# ==============================================================================
-# CONFIGURATION
-# ==============================================================================
-SERVER_NAME = r'localhost\SQLEXPRESS'
-DATABASE_NAME = 'pqFirstVerifyProduction'
-AWS_LLM_IP = "15.207.85.212"  # <--- VERIFY IP
-AWS_URL = f"http://{AWS_LLM_IP}:11434/api/chat"
+
 
 app = FastAPI(title="FirstVerify AI Agent (Production)")
 
@@ -39,15 +35,25 @@ app.add_middleware(
 # ----------------------
 
 
+# 1. Models for the Request and Feedback
 class QuestionRequest(BaseModel):
     extraction_id: int
     question: str
 
 
-# ==============================================================================
-# GOLD STANDARD DICTIONARY (Safety Net)
-# ==============================================================================
+class FeedbackRequest(BaseModel):
+    question: str
+    sql_generated: str
+    is_positive: bool  # True for 👍, False for 👎
+
+
+# 2. Updated GOLD STANDARD (Now including Static fields)
+# Note: Static_ fields tell our logic to look at the 'Document' or 'Organization' tables
 CORE_OVERRIDE = {
+    "GST Number": "Static_GST",
+    "PAN": "Static_PAN",
+    "Company Name": "Static_OrgName",
+    "Document Name": "Static_DocName",
     "Producer Name": 55,
     "Insurer Name": 104,
     "GL Occurrence Limit": 19,
@@ -96,58 +102,62 @@ def call_llama_for_ids(prompt):
     try:
         response = requests.post(AWS_URL, json=payload, timeout=90)
         if response.status_code == 200:
-            return response.json()['message']['content']
-        return ""
-    except:
+           
+            raw_text = response.json()['message']['content']
+            # This removes <|start_header_id|>assistant<|end_header_id|> and other junk
+            clean_text = re.sub(r'<\|.*?\|>', '', raw_text).strip()
+            return clean_text
+        else:
+            print(f"❌ LLM API Error: {response.status_code} - {response.text}")
+            return ""
+    except Exception as e:
+        # This will show the REAL error
+        print(f"❌ Connection Error to LLM: {e}")
         return ""
 
 
 def construct_sql_query(ai_text, extraction_id, context_map):
-    """
-    PRODUCTION UPGRADE:
-    1. Extract IDs found by AI.
-    2. Reverse-Lookup the ID in 'context_map' to find the Official Name.
-    3. Generate SQL with human-readable Aliases (AS [Producer_Name]).
-    """
     # 1. Extract numbers using Regex
     found_ids = re.findall(r'\b\d+\b', ai_text)
 
-    # Filter out extraction_id to avoid confusion
-    clean_ids = list(set([int(id)
-                     for id in found_ids if id != str(extraction_id)]))
+    # --- ADD THIS LOGIC TO REMOVE JUNK ---
+    # Convert to set to remove duplicates, and remove '0' and the extraction_id
+    clean_ids = sorted(list(
+        set([int(id) for id in found_ids if int(id) > 0 and id != str(extraction_id)])))
+    # -------------------------------------
 
     if not clean_ids:
-        return "-- ERROR: AI could not identify any valid data fields."
+        # Check for static fields as a backup
+        static_fields = []
+        if "Static_GST" in ai_text:
+            static_fields.append("D.DocumentId as GST_Number")
+        if "Static_OrgName" in ai_text:
+            static_fields.append("H.DocumentName as Company_Name")
 
-    # 2. Build the SQL Columns with Aliases
-    sql_parts = []
+        if not static_fields:
+            return "-- ERROR: AI could not identify any valid data fields."
 
-    # Create a Reverse Dictionary: ID -> Name (e.g., 55 -> "Producer Name")
-    # This ensures we use the OFFICIAL name from our DB/Config, not the AI's hallucination.
-    id_to_name_map = {v: k for k, v in context_map.items()}
+        select_clause = ",\n  ".join(static_fields)
+    else:
+        # Build dynamic columns
+        id_to_name_map = {v: k for k, v in context_map.items()}
+        sql_parts = []
+        for q_id in clean_ids:
+            raw_name = id_to_name_map.get(q_id, f"Field_{q_id}")
+            safe_alias = re.sub(r'[^a-zA-Z0-9]', '_', raw_name).strip('_')
+            sql_parts.append(
+                f"MAX(CASE WHEN QuestionBankId = {q_id} THEN ExtractedValue END) AS [{safe_alias}]")
 
-    for q_id in clean_ids:
-        # Look up the name. If not found, fallback to Field_ID
-        raw_name = id_to_name_map.get(q_id, f"Field_{q_id}")
-
-        # Sanitize Name for SQL (Remove spaces, special chars)
-        safe_alias = re.sub(r'[^a-zA-Z0-9]', '_', raw_name)
-
-        # Remove trailing underscores if any
-        safe_alias = safe_alias.strip('_')
-
-        sql_parts.append(
-            f"MAX(CASE WHEN QuestionBankId = {q_id} THEN ExtractedValue END) AS [{safe_alias}]")
-
-    columns_sql = ",\n  ".join(sql_parts)
+        select_clause = ",\n  ".join(sql_parts)
 
     final_sql = f"""SELECT 
-  {columns_sql}
-FROM ExtractedDataDetail
-WHERE ExtractionId = {extraction_id};"""
+  {select_clause}
+FROM ExtractionHeader H
+JOIN ExtractedDataDetail D ON H.ExtractionId = D.ExtractionId
+WHERE H.ExtractionId = {extraction_id}
+GROUP BY H.DocumentName, H.DocumentId;"""
 
     return final_sql
-
 # ==============================================================================
 # API ENDPOINT
 # ==============================================================================
@@ -174,24 +184,20 @@ def generate_sql(request: QuestionRequest):
         for name, id_val in CORE_OVERRIDE.items():
             relevant_rules += f"Field: '{name}' -> ID {id_val}\n"
 
-    # 3. Agent Prompt
-    system_prompt = f"""
-    You are a Data Retrieval Assistant.
-    TASK: Identify which IDs the user is asking for.
-    Output ONLY the matching IDs from the list below.
-    
-    ### DATA LIST ###
-    {relevant_rules}
-    
-    ### EXAMPLE ###
-    Data: 'Producer' -> ID 55, 'Insurer' -> ID 104
-    User: "Who is the Producer?"
-    Output: ID 55
-    
-    User Question: "{request.question}"
-    Output (IDs only):
-    """
 
+    system_prompt = f"""
+    [INST] You are a logic-only extraction engine.
+    Match keywords from the User Question to the Knowledge Base.
+    Output ONLY the ID numbers or Static_ tags separated by commas.
+    DO NOT write SQL. DO NOT say "Here is the query." 
+    If no match, output '0'.
+
+    KNOWLEDGE BASE:
+    {relevant_rules}
+
+    User Question: "{request.question}"
+    [/INST]
+    Output (IDs only):"""
     # 4. Call AI
     print(f"DEBUG: Asking AI to map concepts...")
     ai_response = call_llama_for_ids(system_prompt)
@@ -208,6 +214,50 @@ def generate_sql(request: QuestionRequest):
         "generated_sql": generated_sql
     }
 
+
+@app.post("/feedback")
+def save_feedback(feedback: FeedbackRequest):
+    print(
+        f"📝 FEEDBACK RECEIVED: {feedback.question} -> {'👍' if feedback.is_positive else '👎'}")
+
+    # In a real setup, we would save this to a SQL table 'AIFeedbackLogs'
+    # For your demo, we will just log it to a file.
+    with open("logs/feedback_loop.log", "a") as f:
+        status = "GOLDEN" if feedback.is_positive else "FAILED"
+        f.write(
+            f"[{status}] Question: {feedback.question} | SQL: {feedback.sql_generated}\n")
+
+    return {"status": "Feedback Saved"}
+
+
+@app.post("/run_report")
+def run_report(request: dict):
+    sql_query = request.get("sql")
+    if not sql_query or "-- ERROR" in sql_query:
+        return {"error": "Invalid SQL query"}
+
+    try:
+        conn_str = f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={SERVER_NAME};DATABASE={DATABASE_NAME};Trusted_Connection=yes;'
+        conn = pyodbc.connect(conn_str)
+        cursor = conn.cursor()
+
+        cursor.execute(sql_query)
+
+        # Get column names for the table header
+        columns = [column[0] for column in cursor.description]
+
+        # Get all rows
+        rows = cursor.fetchall()
+
+        # Convert rows to a list of dicts for the frontend
+        data = []
+        for row in rows:
+            data.append(dict(zip(columns, row)))
+
+        conn.close()
+        return {"columns": columns, "data": data}
+    except Exception as e:
+        return {"error": f"Database Error: {str(e)}"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)

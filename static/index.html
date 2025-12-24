@@ -166,35 +166,60 @@
         <div id="resultArea" class="output-box">
             <label>🤖 AI Thought Process (ID Extraction)</label>
             <div id="aiLog" class="log-box">...</div>
-
+        
             <label>⚡ Generated Production SQL</label>
             <div id="sqlOutput" class="sql-box">...</div>
+
+            <label>📊 Live Report Results</label>
+            <div id="reportArea" class="sql-box" style="background: white; overflow-x: auto; display: none;">
+                <table id="reportTable" style="width: 100%; border-collapse: collapse; font-family: sans-serif;">
+                    <thead id="tableHead" style="background: #eee;"></thead>
+                    <tbody id="tableBody"></tbody>
+                </table>
+            </div>
+            <button id="runBtn" onclick="executeReport()" style="margin-top:10px; background-color: #6f42c1;">Run This
+                Report</button>
+        
+            <div style="margin-top: 20px; display: flex; align-items: center; gap: 15px;">
+                <label style="margin-bottom: 0;">Is this query correct?</label>
+                <button onclick="sendFeedback(true)" style="width: auto; background-color: #28a745; padding: 8px 15px;">👍
+                    Correct</button>
+                <button onclick="sendFeedback(false)" style="width: auto; background-color: #dc3545; padding: 8px 15px;">👎
+                    Wrong</button>
+            </div>
+            <p id="feedbackStatus" style="font-size: 0.8rem; color: #666; margin-top: 10px;"></p>
         </div>
+ 
+    </div>
     </div>
 
     <script>
+        let currentQuestion = "";
+        let currentSql = "";
+
         async function askAgent() {
-            // 1. Setup UI
             const btn = document.getElementById('submitBtn');
             const loader = document.getElementById('loader');
             const btnText = document.getElementById('btnText');
             const resultArea = document.getElementById('resultArea');
             const aiLog = document.getElementById('aiLog');
             const sqlOutput = document.getElementById('sqlOutput');
+            const feedbackStatus = document.getElementById('feedbackStatus');
 
             btn.disabled = true;
             loader.style.display = 'inline-block';
             btnText.innerText = "Processing...";
             resultArea.style.display = 'none';
+            feedbackStatus.innerText = "";
 
-            // 2. Prepare Data
-            const payload = {
-                extraction_id: parseInt(document.getElementById('extId').value),
-                question: document.getElementById('question').value
-            };
+            currentQuestion = document.getElementById('question').value;
 
             try {
-                // 3. Call Python API
+                const payload = {
+                    extraction_id: parseInt(document.getElementById('extId').value),
+                    question: currentQuestion
+                };
+
                 const response = await fetch('http://127.0.0.1:8000/generate_sql', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -202,28 +227,68 @@
                 });
 
                 const data = await response.json();
+                currentSql = data.generated_sql;
 
-                // 4. Update UI
                 resultArea.style.display = 'block';
-
-                // Show AI Raw Response (Cleaned up a bit)
-                aiLog.innerText = data.ai_identified_ids
-                    ? data.ai_identified_ids.replace(/<\|.*?\|>/g, '').trim()
-                    : "No IDs identified.";
-
-                // Show Final SQL
-                sqlOutput.innerText = data.generated_sql;
+                aiLog.innerText = data.ai_identified_ids ? data.ai_identified_ids.trim() : "No IDs identified.";
+                sqlOutput.innerText = currentSql;
 
             } catch (error) {
                 alert("Error connecting to Python API. Is it running?");
                 console.error(error);
             } finally {
-                // Reset Button
                 btn.disabled = false;
                 loader.style.display = 'none';
                 btnText.innerText = "Generate SQL";
             }
         }
+
+        async function sendFeedback(isPositive) {
+            const feedbackStatus = document.getElementById('feedbackStatus');
+            feedbackStatus.innerText = "Sending feedback...";
+
+            try {
+                const response = await fetch('http://127.0.0.1:8000/feedback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        question: currentQuestion,
+                        sql_generated: currentSql,
+                        is_positive: isPositive
+                    })
+                });
+
+                if (response.ok) {
+                    feedbackStatus.innerText = "✅ Feedback saved! This will help train the AI.";
+                }
+            } catch (error) {
+                feedbackStatus.innerText = "❌ Failed to save feedback.";
+            }
+        }
+
+        async function executeReport() {
+                const reportArea = document.getElementById('reportArea');
+                const tableHead = document.getElementById('tableHead');
+                const tableBody = document.getElementById('tableBody');
+
+                try {
+                    const response = await fetch('http://127.0.0.1:8000/run_report', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ sql: currentSql })
+                    });
+                    const result = await response.json();
+
+                    if (result.error) { alert(result.error); return; }
+
+                    reportArea.style.display = 'block';
+                    tableHead.innerHTML = "<tr>" + result.columns.map(c => `<th style="border:1px solid #ddd; padding:8px;">${c}</th>`).join('') + "</tr>";
+                    tableBody.innerHTML = result.data.map(row =>
+                        "<tr>" + result.columns.map(c => `<td style="border:1px solid #ddd; padding:8px;">${row[c] || ''}</td>`).join('') + "</tr>"
+                    ).join('');
+                } catch (e) { console.error(e); }
+            }
+            
     </script>
 
 </body>
