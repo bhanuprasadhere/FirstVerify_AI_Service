@@ -1,3 +1,11 @@
+import json
+import re
+import requests
+import pyodbc
+from pydantic import BaseModel
+from fastapi import FastAPI
+import uvicorn
+from fastapi.middleware.cors import CORSMiddleware
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -11,15 +19,17 @@ AWS_URL = f"http://{AWS_LLM_IP}:11434/api/chat"
 print(f"🚀 Service starting using LLM at: {AWS_URL}")
 
 # print(f"🚀 Service starting using LLM at: {AWS_URL}")
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-from fastapi import FastAPI
-from pydantic import BaseModel
-import pyodbc
-import requests
-import re
-import json
 
+
+# THE BROAD VIEW: FIXED RELATIONSHIP GRAPH
+DB_RELATIONS = {
+    "base": "ExtractionHeader H",
+    "joins": [
+        "JOIN ExtractedDataDetail D ON H.ExtractionId = D.ExtractionId",
+        "JOIN Prequalification P ON H.PQID = P.PrequalificationId",
+        "JOIN dbo.Organizations O ON P.VendorId = O.OrganizationID"
+    ]
+}
 
 
 app = FastAPI(title="FirstVerify AI Agent (Production)")
@@ -101,7 +111,7 @@ def call_llama_for_ids(prompt):
     try:
         response = requests.post(AWS_URL, json=payload, timeout=90)
         if response.status_code == 200:
-           
+
             raw_text = response.json()['message']['content']
             # This removes <|start_header_id|>assistant<|end_header_id|> and other junk
             clean_text = re.sub(r'<\|.*?\|>', '', raw_text).strip()
@@ -116,36 +126,22 @@ def call_llama_for_ids(prompt):
 
 
 def construct_sql_query(ai_text, extraction_id, context_map):
-    # THE BROAD VIEW: SCHEMA RELATIONSHIPS
-    SCHEMA_RELATIONS = {
-        "base_table": "ExtractionHeader H",
-        "required_joins": [
-            "JOIN ExtractedDataDetail D ON H.ExtractionId = D.ExtractionId",
-            "JOIN Prequalification P ON H.PQID = P.PrequalificationId",
-            "JOIN dbo.Organizations O ON P.VendorId = O.OrganizationID"
-        ],
-        "static_mapping": {
-            "Static_OrgName": "O.Name",
-            "Static_TaxID": "O.TaxID",
-            "Static_DocName": "H.DocumentName"
-        }
-    }
-# 1. Extract IDs and Static Keywords
+    # 1. Extract IDs and Static Keywords
     found_ids = re.findall(r'\b\d+\b', ai_text)
     clean_ids = sorted(list(
         set([int(id) for id in found_ids if int(id) > 0 and id != str(extraction_id)])))
 
-    # 2. Add confirmed Static fields from 'Organizations' table
+    # 2. Identify Static fields
     static_fields = []
     if "Static_TaxID" in ai_text:
         static_fields.append("O.TaxID as Tax_Identification_Number")
     if "Static_OrgName" in ai_text:
-        static_fields.append("O.Name as Company_Name")  # Corrected column name
+        static_fields.append("O.Name as Company_Name")
 
     if not clean_ids and not static_fields:
         return "-- ERROR: AI could not identify any valid data fields."
 
-    # 3. Build the column list
+    # 3. Build the dynamic columns
     id_to_name_map = {v: k for k, v in context_map.items()}
     dynamic_parts = []
     for q_id in clean_ids:
@@ -156,7 +152,7 @@ def construct_sql_query(ai_text, extraction_id, context_map):
 
     select_clause = ",\n  ".join(static_fields + dynamic_parts)
 
-    # 4. FINAL PRODUCTION QUERY (Using correct joins for FirstVerify)
+    # 4. FINAL CORRECTED JOIN (Using VendorId as verified by your SSMS result)
     final_sql = f"""
 SELECT 
   {select_clause}
@@ -168,6 +164,8 @@ WHERE H.ExtractionId = {extraction_id}
 GROUP BY O.Name, O.TaxID;"""
 
     return final_sql
+
+
 # ==============================================================================
 # API ENDPOINT
 # ==============================================================================
@@ -178,13 +176,71 @@ def home():
     return {"status": "Online", "service": "FirstVerify AI Agent"}
 # -------------------------------------
 
+
+# --- THE FINAL ALIGNED SAFETY REPORT TEMPLATE ---
+SAFETY_REPORT_TEMPLATE = """
+SELECT Vendor, EMRStatsYear, emrVal AS EMR,
+       [Number of days away from work: (total from Column K on your OSHA Form)] AS DaysAwayFromWork,
+       [Number of fatalities: (total from Column G on your OSHA Form)] AS Fatalities,
+       [Number of job transfer or restricted work day cases: (total from Column I on your OSHA Form)] AS jobTransfer,
+       [Number of lost work day cases: (total from Column H on your OSHA Form)] AS LostWorkDay,
+       [Number of other recordable cases: (total from Column J on your OSHA Form)] AS OtherRecordableCases,
+       [Total Recordable Incident Rate (TRIR): (total from columns G, H, I, J) x 200,000 / Total employee hours] AS TRIRCases,
+       [Total hours worked by all employees last year: (from your OSHA Form)] AS TotalHoursWorked
+FROM (
+    SELECT o.Name AS Vendor, pesv.QuestionColumnIdValue, pesy.EMRStatsYear, q.QuestionText, emr.emrVal
+    FROM Prequalification p 
+    JOIN Organizations o ON o.OrganizationID = p.VendorId 
+    JOIN PrequalificationEMRStatsYears pesy ON pesy.PrequalificationId = p.PrequalificationId 
+    JOIN PrequalificationEMRStatsValues pesv ON pesy.PrequalEMRStatsYearId = pesv.PrequalEMRStatsYearId 
+    LEFT JOIN (
+        SELECT PreQualificationId, MAX(UserInput) AS emrVal 
+        FROM PrequalificationUserInput ui
+        JOIN QuestionColumnDetails qcol ON qcol.QuestionColumnId = ui.QuestionColumnId
+        JOIN Questions q ON q.QuestionID = qcol.QuestionId 
+        WHERE q.QuestionText LIKE 'EMR%'
+        GROUP BY PreQualificationId
+    ) emr ON emr.PreQualificationId = p.PrequalificationId
+    JOIN QuestionColumnDetails qd ON qd.QuestionColumnId = pesv.QuestionColumnId 
+    JOIN Questions q ON q.QuestionID = qd.QuestionId 
+    WHERE ISNUMERIC(pesy.EMRStatsYear) = 1 
+      {WHERE_CLAUSE} 
+) AS p 
+PIVOT (
+    MAX(QuestionColumnIdValue) FOR QuestionText IN (
+        [Number of days away from work: (total from Column K on your OSHA Form)],
+        [Number of fatalities: (total from Column G on your OSHA Form)],
+        [Number of job transfer or restricted work day cases: (total from Column I on your OSHA Form)],
+        [Number of lost work day cases: (total from Column H on your OSHA Form)],
+        [Number of other recordable cases: (total from Column J on your OSHA Form)],
+        [Total Recordable Incident Rate (TRIR): (total from columns G, H, I, J) x 200,000 / Total employee hours],
+        [Total hours worked by all employees last year: (from your OSHA Form)]
+    )
+) AS piv 
+WHERE CAST(EMRStatsYear AS DECIMAL(18,2)) > 2012 
+ORDER BY Vendor, EMRStatsYear;
+"""
+
 @app.post("/generate_sql")
 def generate_sql(request: QuestionRequest):
-    # 1. Context
-    full_context_map = get_hybrid_context()
+    question_lower = request.question.lower()
 
-    # 2. Filter Rules
-    user_words = request.question.lower().split()
+    # Recognize if the user wants safety stats (Dynamic Report)
+    if any(word in question_lower for word in ["safety", "osha", "emr", "fatality", "rir", "dart"]):
+        # Build the dynamic report SQL using Kiran's PIVOT template
+        sql = SAFETY_REPORT_TEMPLATE.format(
+            WHERE_CLAUSE=f"AND p.PrequalificationId = (SELECT PQID FROM ExtractionHeader WHERE ExtractionId = {request.extraction_id})"
+        )
+        return {
+            "extraction_id": request.extraction_id,
+            "original_question": request.question,
+            "ai_identified_ids": "SAFETY_PIVOT_MODE",
+            "generated_sql": sql
+        }
+
+    # Standard ID mapping logic for other questions
+    full_context_map = get_hybrid_context()
+    user_words = question_lower.split()
     relevant_rules = ""
     for name, id_val in full_context_map.items():
         if any(word in name.lower() for word in user_words if len(word) > 2):
@@ -194,26 +250,18 @@ def generate_sql(request: QuestionRequest):
         for name, id_val in CORE_OVERRIDE.items():
             relevant_rules += f"Field: '{name}' -> ID {id_val}\n"
 
-
     system_prompt = f"""
-    [INST] You are a logic-only extraction engine.
-    Match keywords from the User Question to the Knowledge Base.
-    Output ONLY the ID numbers or Static_ tags separated by commas.
-    DO NOT write SQL. DO NOT say "Here is the query." 
-    If no match, output '0'.
-
+    [INST] You are a logic-only extraction engine. Output ONLY ID numbers or Static_ tags.
     KNOWLEDGE BASE:
     {relevant_rules}
-
     User Question: "{request.question}"
     [/INST]
     Output (IDs only):"""
-    # 4. Call AI
+
     print(f"DEBUG: Asking AI to map concepts...")
     ai_response = call_llama_for_ids(system_prompt)
     print(f"DEBUG: AI said: {ai_response}")
 
-    # 5. Python Builds the SQL (Passing context_map for naming)
     generated_sql = construct_sql_query(
         ai_response, request.extraction_id, full_context_map)
 
@@ -268,6 +316,7 @@ def run_report(request: dict):
         return {"columns": columns, "data": data}
     except Exception as e:
         return {"error": f"Database Error: {str(e)}"}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
