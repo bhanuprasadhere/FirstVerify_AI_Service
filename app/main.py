@@ -50,8 +50,7 @@ class FeedbackRequest(BaseModel):
 # 2. Updated GOLD STANDARD (Now including Static fields)
 # Note: Static_ fields tell our logic to look at the 'Document' or 'Organization' tables
 CORE_OVERRIDE = {
-    "GST Number": "Static_GST",
-    "PAN": "Static_PAN",
+    "Tax ID": "Static_TaxID",
     "Company Name": "Static_OrgName",
     "Document Name": "Static_DocName",
     "Producer Name": 55,
@@ -117,45 +116,56 @@ def call_llama_for_ids(prompt):
 
 
 def construct_sql_query(ai_text, extraction_id, context_map):
-    # 1. Extract numbers using Regex
+    # THE BROAD VIEW: SCHEMA RELATIONSHIPS
+    SCHEMA_RELATIONS = {
+        "base_table": "ExtractionHeader H",
+        "required_joins": [
+            "JOIN ExtractedDataDetail D ON H.ExtractionId = D.ExtractionId",
+            "JOIN Prequalification P ON H.PQID = P.PrequalificationId",
+            "JOIN dbo.Organizations O ON P.VendorId = O.OrganizationID"
+        ],
+        "static_mapping": {
+            "Static_OrgName": "O.Name",
+            "Static_TaxID": "O.TaxID",
+            "Static_DocName": "H.DocumentName"
+        }
+    }
+# 1. Extract IDs and Static Keywords
     found_ids = re.findall(r'\b\d+\b', ai_text)
-
-    # --- ADD THIS LOGIC TO REMOVE JUNK ---
-    # Convert to set to remove duplicates, and remove '0' and the extraction_id
     clean_ids = sorted(list(
         set([int(id) for id in found_ids if int(id) > 0 and id != str(extraction_id)])))
-    # -------------------------------------
 
-    if not clean_ids:
-        # Check for static fields as a backup
-        static_fields = []
-        if "Static_GST" in ai_text:
-            static_fields.append("D.DocumentId as GST_Number")
-        if "Static_OrgName" in ai_text:
-            static_fields.append("H.DocumentName as Company_Name")
+    # 2. Add confirmed Static fields from 'Organizations' table
+    static_fields = []
+    if "Static_TaxID" in ai_text:
+        static_fields.append("O.TaxID as Tax_Identification_Number")
+    if "Static_OrgName" in ai_text:
+        static_fields.append("O.Name as Company_Name")  # Corrected column name
 
-        if not static_fields:
-            return "-- ERROR: AI could not identify any valid data fields."
+    if not clean_ids and not static_fields:
+        return "-- ERROR: AI could not identify any valid data fields."
 
-        select_clause = ",\n  ".join(static_fields)
-    else:
-        # Build dynamic columns
-        id_to_name_map = {v: k for k, v in context_map.items()}
-        sql_parts = []
-        for q_id in clean_ids:
-            raw_name = id_to_name_map.get(q_id, f"Field_{q_id}")
-            safe_alias = re.sub(r'[^a-zA-Z0-9]', '_', raw_name).strip('_')
-            sql_parts.append(
-                f"MAX(CASE WHEN QuestionBankId = {q_id} THEN ExtractedValue END) AS [{safe_alias}]")
+    # 3. Build the column list
+    id_to_name_map = {v: k for k, v in context_map.items()}
+    dynamic_parts = []
+    for q_id in clean_ids:
+        raw_name = id_to_name_map.get(q_id, f"Field_{q_id}")
+        safe_alias = re.sub(r'[^a-zA-Z0-9]', '_', raw_name).strip('_')
+        dynamic_parts.append(
+            f"MAX(CASE WHEN QuestionBankId = {q_id} THEN ExtractedValue END) AS [{safe_alias}]")
 
-        select_clause = ",\n  ".join(sql_parts)
+    select_clause = ",\n  ".join(static_fields + dynamic_parts)
 
-    final_sql = f"""SELECT 
+    # 4. FINAL PRODUCTION QUERY (Using correct joins for FirstVerify)
+    final_sql = f"""
+SELECT 
   {select_clause}
 FROM ExtractionHeader H
 JOIN ExtractedDataDetail D ON H.ExtractionId = D.ExtractionId
+JOIN Prequalification P ON H.PQID = P.PrequalificationId
+JOIN dbo.Organizations O ON P.VendorId = O.OrganizationID
 WHERE H.ExtractionId = {extraction_id}
-GROUP BY H.DocumentName, H.DocumentId;"""
+GROUP BY O.Name, O.TaxID;"""
 
     return final_sql
 # ==============================================================================
