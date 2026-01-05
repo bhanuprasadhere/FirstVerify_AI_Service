@@ -94,14 +94,25 @@
             currentPage = 1; // FIX: Reset page on search
             const extId = document.getElementById('extraction_id').value;
             const question = document.getElementById('user_question').value;
+
+            // Add timeout handler - after 8 seconds, show processing message
+            const timeoutId = setTimeout(() => {
+                document.getElementById('statusInfo').innerText = "⏳ AI is processing a complex request, please do not refresh...";
+            }, 8000);
+
             try {
                 const genRes = await (await fetch(`${API}/generate_sql`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ extraction_id: parseInt(extId), question: question }) })).json();
-                if (genRes.error) { alert(genRes.error); return; }
+                if (genRes.error) { alert(genRes.error); clearTimeout(timeoutId); return; }
                 const runRes = await (await fetch(`${API}/run_report`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql: genRes.generated_sql }) })).json();
+                clearTimeout(timeoutId); // Clear timeout since request completed
                 masterData = runRes.data; masterCols = runRes.columns;
                 renderAll();
-                document.getElementById('statusInfo').innerText = "Search Result Displayed.";
-            } catch (e) { alert("Connection Error"); }
+                document.getElementById('statusInfo').innerText = "✅ Search Result Displayed.";
+            } catch (e) {
+                clearTimeout(timeoutId);
+                alert("Connection Error");
+                document.getElementById('statusInfo').innerText = "❌ Error occurred. Please try again.";
+            }
         }
 
         function setLoading(isLoading, text) {

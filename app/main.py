@@ -119,8 +119,9 @@ def get_pivot_sql(subject="Safety", extraction_id=None):
             # Comprehensive safety keywords: OSHA metrics, incident rates, EMR
             kw = "LIKE '%OSHA%' OR q.QuestionText LIKE '%TRIR%' OR q.QuestionText LIKE '%Recordable%' OR q.QuestionText LIKE '%Fatalit%' OR q.QuestionText LIKE '%Work Day%' OR q.QuestionText LIKE '%EMR%' OR q.QuestionText LIKE '%DART%' OR q.QuestionText LIKE '%Lost%' OR q.QuestionText LIKE '%Restricted%'"
         else:
-            # Financials - Must match ACTUAL column names in database (validated against real data)
-            kw = "LIKE '%Insurance%' OR q.QuestionText LIKE '%Liability%' OR q.QuestionText LIKE '%Premium%' OR q.QuestionText LIKE '%Coverage%' OR q.QuestionText LIKE '%Aggregate%' OR q.QuestionText LIKE '%Bodily%' OR q.QuestionText LIKE '%Property Damage%'"
+            # Financials - BROADENED KEYWORDS for better discovery
+            # Now includes: Revenue, Net Worth, Annual, Sales, Financial, Insurance, Liability, Premium, Coverage, Aggregate
+            kw = "LIKE '%Revenue%' OR q.QuestionText LIKE '%Net Worth%' OR q.QuestionText LIKE '%Annual%' OR q.QuestionText LIKE '%Sales%' OR q.QuestionText LIKE '%Financial%' OR q.QuestionText LIKE '%Insurance%' OR q.QuestionText LIKE '%Liability%' OR q.QuestionText LIKE '%Premium%' OR q.QuestionText LIKE '%Coverage%' OR q.QuestionText LIKE '%Aggregate%'"
 
         # 1. Column Discovery with 120-char truncation to prevent SQL Error 42000
         cursor.execute(f"""
@@ -138,7 +139,7 @@ def get_pivot_sql(subject="Safety", extraction_id=None):
         where = f"AND p.PrequalificationId = (SELECT PQID FROM ExtractionHeader WHERE ExtractionId = {extraction_id})" if extraction_id else ""
 
         query = f"""
-        SELECT TOP 100 Vendor, EMRStatsYear, emrVal AS EMR, {pivot_cols}
+        SELECT TOP 2000 Vendor, EMRStatsYear, emrVal AS EMR, {pivot_cols}
         FROM (
             SELECT o.Name AS Vendor, pesv.QuestionColumnIdValue, pesy.EMRStatsYear, LEFT(q.QuestionText, 120) as QuestionText, emr.emrVal
             FROM Prequalification p 
