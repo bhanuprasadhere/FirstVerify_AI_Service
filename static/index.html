@@ -36,9 +36,10 @@
             <div class="card p-4 shadow-sm">
                 <div class="row g-3">
                     <div class="col-md-2"><label class="form-label fw-bold">Extraction ID</label><input type="number"
-                            id="ext_id" class="form-control" value="3053"></div>
+                            id="extraction_id" class="form-control" value="3053"></div>
                     <div class="col-md-6"><label class="form-label fw-bold">Ask a Question</label><input type="text"
-                            id="q" class="form-control" placeholder="Search safety, financials, or limits..."></div>
+                            id="user_question" class="form-control"
+                            placeholder="Search safety, financials, or limits..."></div>
                     <div class="col-md-4 d-flex align-items-end gap-2">
                         <button onclick="askAI()" id="aiBtn" class="btn btn-primary w-100">AI Search</button>
                         <button onclick="loadDashboard('Safety')" id="safeBtn"
@@ -69,35 +70,38 @@
         let masterData = []; let masterCols = []; let currentPage = 1; const pageSize = 50; const API = "http://127.0.0.1:8000";
 
         async function loadDashboard(subject) {
-            setLoading(true, `⚡ Loading ${subject} records...`);
+            currentPage = 1; // RESET PAGE IMMEDIATELY
+            document.getElementById('statusInfo').innerText = `⚡ Searching for ${subject} records...`;
             try {
                 const response = await fetch(`${API}/api/reports/paginated?subject=${subject}`);
                 const res = await response.json();
 
                 if (res.status === "error") {
-                    alert(`Data Notice: ${res.message}`);
-                    setLoading(false, "No data available for this view.");
+                    alert(res.message);
+                    setLoading(false, "Discovery failed.");
                     return;
                 }
 
-                masterData = res.data; masterCols = res.columns; currentPage = 1;
+                masterData = res.data;
+                masterCols = res.columns;
                 renderAll();
-                setLoading(false, `${subject} Dashboard Loaded.`);
-            } catch (e) { alert("Network Error: Backend is not responding."); setLoading(false, "System Error."); }
+                setLoading(false, `${subject} Dashboard Ready.`);
+            } catch (e) { alert("Network Error"); setLoading(false, "System Error."); }
         }
 
         async function askAI() {
-            setLoading(true, "🤖 Analyzing intent...");
-            const body = { extraction_id: document.getElementById('ext_id').value, question: document.getElementById('q').value };
+            document.getElementById('statusInfo').innerText = "🤖 Analyzing...";
+            currentPage = 1; // FIX: Reset page on search
+            const extId = document.getElementById('extraction_id').value;
+            const question = document.getElementById('user_question').value;
             try {
-                const genRes = await (await fetch(`${API}/generate_sql`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
-                if (genRes.error) { alert(genRes.error); setLoading(false, "AI Failed."); return; }
-
+                const genRes = await (await fetch(`${API}/generate_sql`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ extraction_id: parseInt(extId), question: question }) })).json();
+                if (genRes.error) { alert(genRes.error); return; }
                 const runRes = await (await fetch(`${API}/run_report`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sql: genRes.generated_sql }) })).json();
-                masterData = runRes.data; masterCols = runRes.columns; currentPage = 1;
+                masterData = runRes.data; masterCols = runRes.columns;
                 renderAll();
-                setLoading(false, `AI Specialist Mode: ${genRes.ai_identified_ids}`);
-            } catch (e) { alert("AI Search Failed."); setLoading(false, "Search Error."); }
+                document.getElementById('statusInfo').innerText = "Search Result Displayed.";
+            } catch (e) { alert("Connection Error"); }
         }
 
         function setLoading(isLoading, text) {
@@ -106,12 +110,22 @@
         }
 
         function renderAll() {
+            if (masterData.length === 0) {
+                document.getElementById('reportArea').classList.add('d-none');
+                document.getElementById('statusInfo').innerText = 'No data returned. Check filters or database connection.';
+                return;
+            }
             document.getElementById('reportArea').classList.remove('d-none');
             renderPaginationUI();
             displayPageRows();
         }
 
         function renderPaginationUI() {
+            if (masterData.length === 0) {
+                document.getElementById('paginationControls').innerHTML = '';
+                document.getElementById('statsInfo').innerText = 'No records found.';
+                return;
+            }
             const totalPages = Math.ceil(masterData.length / pageSize);
             const container = document.getElementById('paginationControls');
             let html = `<button onclick="goToPage(${currentPage - 1})" class="btn btn-sm btn-dark" ${currentPage === 1 ? 'disabled' : ''}>Prev</button>`;
